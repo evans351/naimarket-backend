@@ -44,7 +44,6 @@ app.post('/api/login', (req, res) => {
   console.log('🔐 Login attempt with email:', email);
 
   const sql = 'SELECT * FROM users WHERE email = ?';
-
   db.query(sql, [email], async (err, results) => {
     if (err) {
       console.error('❌ DB Error:', err);
@@ -52,70 +51,65 @@ app.post('/api/login', (req, res) => {
     }
 
     if (results.length === 0) {
-      return res.status(401).json({ message: 'Invalid credentials (email not found)' });
+      console.log('🚫 No user found');
+      return res.status(401).json({ message: 'Invalid credentials (email)' });
     }
 
     const user = results[0];
-    const isMatch = await bcrypt.compare(password, user.password);
 
-    if (!isMatch) {
-      return res.status(401).json({ message: 'Invalid credentials (password mismatch)' });
+    if (!user.password) {
+      console.error('❌ Password missing from DB');
+      return res.status(500).json({ message: 'Corrupted user data' });
     }
 
-    if (user.role === 'vendor') {
-      const vendorSql = 'SELECT id FROM vendors WHERE user_id = ? LIMIT 1';
-      db.query(vendorSql, [user.id], (vendorErr, vendorResults) => {
-        if (vendorErr) {
-          console.error('❌ Vendor lookup error:', vendorErr);
-          return res.status(500).json({ message: 'Login error (vendor lookup)' });
-        }
+    try {
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) {
+        console.log('🚫 Wrong password');
+        return res.status(401).json({ message: 'Invalid credentials (password)' });
+      }
 
-        const vendorId = vendorResults[0]?.id || null;
+      // 🔁 Continue role-specific logic
+      if (user.role === 'vendor') {
+        const vendorSql = 'SELECT id FROM vendors WHERE user_id = ? LIMIT 1';
+        db.query(vendorSql, [user.id], (vendorErr, vendorResults) => {
+          if (vendorErr) {
+            console.error('❌ Vendor lookup error:', vendorErr);
+            return res.status(500).json({ message: 'Vendor lookup failed' });
+          }
 
+          const vendorId = vendorResults[0]?.id || null;
+          return res.json({
+            message: 'Login successful',
+            user: { id: user.id, name: user.name, email: user.email, role: user.role, vendorId }
+          });
+        });
+
+      } else if (user.role === 'customer') {
+        const customerSql = 'SELECT id FROM customers WHERE user_id = ? LIMIT 1';
+        db.query(customerSql, [user.id], (custErr, custResults) => {
+          if (custErr) {
+            console.error('❌ Customer lookup error:', custErr);
+            return res.status(500).json({ message: 'Customer lookup failed' });
+          }
+
+          const customerId = custResults[0]?.id || null;
+          return res.json({
+            message: 'Login successful',
+            user: { id: user.id, name: user.name, email: user.email, role: user.role, customerId }
+          });
+        });
+
+      } else {
         return res.json({
           message: 'Login successful',
-          user: {
-            id: user.id,
-            name: user.name,
-            email: user.email,
-            role: user.role,
-            vendorId
-          }
+          user: { id: user.id, name: user.name, email: user.email, role: user.role }
         });
-      });
+      }
 
-    } else if (user.role === 'customer') {
-      const customerSql = 'SELECT id FROM customers WHERE user_id = ? LIMIT 1';
-      db.query(customerSql, [user.id], (custErr, custResults) => {
-        if (custErr) {
-          console.error('❌ Customer lookup error:', custErr);
-          return res.status(500).json({ message: 'Login error (customer lookup)' });
-        }
-
-        const customerId = custResults[0]?.id || null;
-
-        return res.json({
-          message: 'Login successful',
-          user: {
-            id: user.id,
-            name: user.name,
-            email: user.email,
-            role: user.role,
-            customerId
-          }
-        });
-      });
-
-    } else {
-      return res.json({
-        message: 'Login successful',
-        user: {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          role: user.role
-        }
-      });
+    } catch (compareErr) {
+      console.error('❌ Error comparing passwords:', compareErr);
+      return res.status(500).json({ message: 'Server error (bcrypt)' });
     }
   });
 });
