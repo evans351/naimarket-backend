@@ -2,104 +2,73 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
+const path = require('path');
 const db = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
+// ✅ Middleware
 app.use(cors());
 app.use(express.json());
 
-// ✅ Serve static image files from /uploads
-const path = require('path');
+// ✅ Serve static files (e.g., user uploads)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-
-// ✅ Route Imports
+// ✅ Route imports
 const userRoutes = require('./routes/users');
-const serviceRoutes = require('./routes/services'); // contains /api/secure-file
+const serviceRoutes = require('./routes/services');
 const vendorRoutes = require('./routes/vendor');
 const categoryRoutes = require('./routes/categories');
 const orderRoutes = require('./routes/orders');
+const paymentsRoutes = require('./routes/payments');
 
-// ✅ Mount Routes
+// ✅ Mount API Routes
 app.use('/api/users', userRoutes);
-app.use('/api/services', serviceRoutes);  // e.g., /api/services/...
+app.use('/api/services', serviceRoutes);        // includes /api/services/secure-file
 app.use('/api/vendors', vendorRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/orders', orderRoutes);
-
-// ✅ Secure file route (from services.js)
-app.use('/api', serviceRoutes);  // so /api/secure-file works
+app.use('/api/pay', paymentsRoutes);            // now clearly /api/pay/paystack etc
 
 // ✅ Health Check
 app.get('/', (req, res) => {
-  res.send('NaiMarket API is running!');
+  res.send('🛍️ NaiMarket API is running!');
 });
 
-// ✅ Login with vendorId if vendor
+// ✅ LOGIN route with role check
 app.post('/api/login', (req, res) => {
   const { email, password } = req.body;
-  console.log('🔐 Login attempt with email:', email);
+  console.log('🔐 Login attempt from:', email);
 
   const sql = 'SELECT * FROM users WHERE email = ?';
   db.query(sql, [email], async (err, results) => {
-    if (err) {
-      console.error('❌ DB Error:', err);
-      return res.status(500).json({ message: 'Database error' });
-    }
-
-    if (results.length === 0) {
-      console.log('🚫 No user found');
-      return res.status(401).json({ message: 'Invalid credentials (email)' });
-    }
+    if (err) return res.status(500).json({ message: 'Database error' });
+    if (results.length === 0) return res.status(401).json({ message: 'Invalid email or password' });
 
     const user = results[0];
 
-    if (!user.password) {
-      console.error('❌ Password missing from DB');
-      return res.status(500).json({ message: 'Corrupted user data' });
-    }
-
     try {
       const isMatch = await bcrypt.compare(password, user.password);
-      if (!isMatch) {
-        console.log('🚫 Wrong password');
-        return res.status(401).json({ message: 'Invalid credentials (password)' });
-      }
+      if (!isMatch) return res.status(401).json({ message: 'Invalid email or password' });
 
-      // 🔁 Continue role-specific logic
+      const lookupRoleProfile = (roleTable, key) => {
+        const sql = `SELECT id FROM ${roleTable} WHERE user_id = ? LIMIT 1`;
+        db.query(sql, [user.id], (err, results) => {
+          if (err) return res.status(500).json({ message: `Error fetching ${roleTable} profile` });
+
+          const profileId = results[0]?.id || null;
+          return res.json({
+            message: 'Login successful',
+            user: { id: user.id, name: user.name, email: user.email, role: user.role, [key]: profileId }
+          });
+        });
+      };
+
       if (user.role === 'vendor') {
-        const vendorSql = 'SELECT id FROM vendors WHERE user_id = ? LIMIT 1';
-        db.query(vendorSql, [user.id], (vendorErr, vendorResults) => {
-          if (vendorErr) {
-            console.error('❌ Vendor lookup error:', vendorErr);
-            return res.status(500).json({ message: 'Vendor lookup failed' });
-          }
-
-          const vendorId = vendorResults[0]?.id || null;
-          return res.json({
-            message: 'Login successful',
-            user: { id: user.id, name: user.name, email: user.email, role: user.role, vendorId }
-          });
-        });
-
+        lookupRoleProfile('vendors', 'vendorId');
       } else if (user.role === 'customer') {
-        const customerSql = 'SELECT id FROM customers WHERE user_id = ? LIMIT 1';
-        db.query(customerSql, [user.id], (custErr, custResults) => {
-          if (custErr) {
-            console.error('❌ Customer lookup error:', custErr);
-            return res.status(500).json({ message: 'Customer lookup failed' });
-          }
-
-          const customerId = custResults[0]?.id || null;
-          return res.json({
-            message: 'Login successful',
-            user: { id: user.id, name: user.name, email: user.email, role: user.role, customerId }
-          });
-        });
-
+        lookupRoleProfile('customers', 'customerId');
       } else {
         return res.json({
           message: 'Login successful',
@@ -107,73 +76,49 @@ app.post('/api/login', (req, res) => {
         });
       }
 
-    } catch (compareErr) {
-      console.error('❌ Error comparing passwords:', compareErr);
-      return res.status(500).json({ message: 'Server error (bcrypt)' });
+    } catch (error) {
+      return res.status(500).json({ message: 'Login server error' });
     }
   });
 });
 
-// ✅ Register with role-based profile creation
+// ✅ REGISTER route with profile creation
 app.post('/api/register', async (req, res) => {
   const { name, email, password, role } = req.body;
 
-  if (!name || !email || !password || !role) {
+  if (!name || !email || !password || !role)
     return res.status(400).json({ message: 'All fields are required' });
-  }
 
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
-
     const userSql = 'INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)';
+
     db.query(userSql, [name, email, hashedPassword, role], (err, result) => {
-      if (err) {
-        console.error('❌ Registration error:', err);
-        return res.status(500).json({ message: 'Error registering user' });
-      }
+      if (err) return res.status(500).json({ message: 'User creation failed' });
 
       const userId = result.insertId;
 
-      const respond = () => {
-        res.status(201).json({
-          message: `${role} registered successfully`,
-          user: {
-            id: userId,
-            name,
-            email,
-            role
-          }
-        });
-      };
+      const respond = () => res.status(201).json({
+        message: `${role} registered successfully`,
+        user: { id: userId, name, email, role }
+      });
 
       if (role === 'vendor') {
-        const vendorSql = 'INSERT INTO vendors (user_id, name) VALUES (?, ?)';
-        db.query(vendorSql, [userId, name], (vendorErr) => {
-          if (vendorErr) {
-            console.error('❌ Vendor insert error:', vendorErr);
-            return res.status(500).json({ message: 'User added, but failed to create vendor profile' });
-          }
+        db.query('INSERT INTO vendors (user_id, name) VALUES (?, ?)', [userId, name], (e) => {
+          if (e) return res.status(500).json({ message: 'Vendor profile creation failed' });
           respond();
         });
-
       } else if (role === 'customer') {
-        const customerSql = 'INSERT INTO customers (user_id, name) VALUES (?, ?)';
-        db.query(customerSql, [userId, name], (custErr) => {
-          if (custErr) {
-            console.error('❌ Customer insert error:', custErr);
-            return res.status(500).json({ message: 'User added, but failed to create customer profile' });
-          }
+        db.query('INSERT INTO customers (user_id, name) VALUES (?, ?)', [userId, name], (e) => {
+          if (e) return res.status(500).json({ message: 'Customer profile creation failed' });
           respond();
         });
-
       } else {
-        respond(); // Admin role
+        respond();
       }
     });
-
-  } catch (err) {
-    console.error('❌ Hashing/server error:', err);
-    return res.status(500).json({ message: 'Server error' });
+  } catch (error) {
+    res.status(500).json({ message: 'Registration server error' });
   }
 });
 
@@ -182,9 +127,9 @@ app.post('/api/logout', (req, res) => {
   res.json({ message: 'User logged out successfully' });
 });
 
-// ✅ Start server
+// ✅ Start Server
 app.listen(PORT, () => {
-  console.log(`🚀 Server is running on http://localhost:${PORT}`);
+  console.log(`🚀 NaiMarket API is running on http://localhost:${PORT}`);
 });
 
 
